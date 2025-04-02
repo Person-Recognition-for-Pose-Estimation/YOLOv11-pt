@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from .nn import YOLO, yolo_v11_n
+import time
 
 class ResNetYOLOAdapter(nn.Module):
     def __init__(self, backbone_channels=2048):
@@ -14,8 +15,7 @@ class ResNetYOLOAdapter(nn.Module):
             nn.BatchNorm2d(512),
             nn.SiLU(),
             
-            # Upsample to match YOLO input size
-            nn.Upsample(size=(640, 640), mode='bilinear', align_corners=True),
+            # Upsample to match YOLO input size (will be resized based on input)
             
             # Progressive channel reduction with spatial processing
             nn.Conv2d(512, 256, kernel_size=3, padding=1),
@@ -45,12 +45,21 @@ class ResNetYOLOAdapter(nn.Module):
                 nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
+        # Get input spatial dimensions
+        _, _, H, W = x.shape
+        
         # Normalize features
         x = x - x.mean(dim=(2, 3), keepdim=True)
         x = x / (x.std(dim=(2, 3), keepdim=True) + 1e-6)
         
-        # Convert features to RGB-like format
-        x = self.adapter(x)
+        # Process through adapter network
+        x = self.adapter[0:3](x)  # Initial reduction
+        
+        # Upsample to YOLO input size (640x640)
+        x = nn.functional.interpolate(x, size=(640, 640), mode='bilinear', align_corners=True)
+        
+        # Further processing
+        x = self.adapter[3:](x)
         
         # Ensure output is in expected range [0, 1]
         x = torch.sigmoid(x)
@@ -79,62 +88,45 @@ class ResNetYOLO(nn.Module):
         # First create YOLO model with original 80 classes to load weights properly
         self.yolo = yolo_v11_n(num_classes=80)
         
+        # Expose YOLO attributes needed by loss function
+        self.head = self.yolo.head
+        self.stride = self.yolo.stride
+        
         # Load pretrained weights
         if pretrained_yolo_path:
             print(f"Loading pretrained YOLO weights from {pretrained_yolo_path}")
             state_dict = torch.load(pretrained_yolo_path, map_location='cpu')
             if isinstance(state_dict, dict) and 'model' in state_dict:
                 state_dict = state_dict['model']
-            
-            # Load all weights first
-            self.yolo.load_state_dict(state_dict, strict=True)
-            
-            # Now modify the classification head for single class
-            width = [3, 16, 32, 64, 128, 256]  # Default for yolo_v11_n
-            filters = (width[3], width[4], width[5])
-            
-            # Create new classification heads with 1 class
-            new_cls_heads = nn.ModuleList()
-            for x in filters:
-                # Keep the feature extraction part of cls head
-                old_cls_head = self.yolo.head.cls[len(new_cls_heads)]
-                new_cls_head = nn.Sequential(
-                    # Copy first 4 layers that extract features
-                    *list(old_cls_head[:-1]),
-                    # New final layer for single class
-                    nn.Conv2d(x, out_channels=1, kernel_size=1)
-                )
-                
-                # Initialize the new classification layer
-                new_cls_head[-1].weight.data.normal_(0, 0.01)
-                new_cls_head[-1].bias.data.fill_(-4.595)  # -log((1 - 0.01) / 0.01)
-                
-                new_cls_heads.append(new_cls_head)
-            
-            # Replace classification heads
-            self.yolo.head.cls = new_cls_heads
-            self.yolo.head.nc = 1
-            self.yolo.head.no = 1 + self.yolo.head.ch * 4  # Update output size
         
         # Freeze only the ResNet backbone
         for param in [self.conv1, self.bn1, self.layer1, self.layer2, self.layer3, self.layer4]:
             for p in param.parameters():
                 p.requires_grad = False
-    
+
     def forward(self, x):
-        # ResNet backbone
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
+        with torch.no_grad(), torch.cuda.amp.autocast():
+            x = self.conv1(x)
+            x = self.bn1(x)
+            x = self.relu(x)
+            x = self.maxpool(x)
+            
+            x = self.layer1(x)
+            torch.cuda.empty_cache()
+            
+            x = self.layer2(x)
+            torch.cuda.empty_cache()
+            
+            x = self.layer3(x)
+            torch.cuda.empty_cache()
+            
+            x = self.layer4(x)
+            torch.cuda.empty_cache()
+            
+            x = self.adapter(x)
+            torch.cuda.empty_cache()
         
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x = x.detach().contiguous()
         
-        # Convert ResNet features to YOLO input format
-        x = self.adapter(x)
-        
-        # Pass through YOLO model
         return self.yolo(x)
+        

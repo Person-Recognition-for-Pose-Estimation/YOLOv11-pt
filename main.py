@@ -4,23 +4,25 @@ import os
 import warnings
 from argparse import ArgumentParser
 
-import torch
-import tqdm
-import yaml
-from torch.utils import data
+import torch # type: ignore
+import tqdm # type: ignore
+import yaml # type: ignore
+from torch.utils import data # type: ignore
 
 from nets import nn
 from nets.resnet_yolo import ResNetYOLO
 from utils import util
 from utils.dataset import Dataset
 
+import random
+
 warnings.filterwarnings("ignore")
 
-data_dir = '../Dataset/COCO' # TODO: Temp path
+data_dir = '/home/ubuntu/datasets/coco'
 
 
 def train(args, params):
-    model = ResNetYOLO(pretrained_yolo_path='path/to/yolo11n.pt') # TODO: Temp path
+    model = ResNetYOLO(pretrained_yolo_path='/home/ubuntu/newThesis/YOLOv11-pt/weights/best.pt')
     model.cuda()
 
     # Optimizer
@@ -38,6 +40,8 @@ def train(args, params):
         for filename in f.readlines():
             filename = os.path.basename(filename.rstrip())
             filenames.append(f'{data_dir}/images/train2017/' + filename)
+
+    filenames = random.sample(filenames, 10000)
 
     sampler = None
     dataset = Dataset(filenames, args.input_size, params, augment=True)
@@ -240,7 +244,7 @@ def test(args, params, model=None):
 
 
 def profile(args, params):
-    import thop
+    import thop # type: ignore
     shape = (1, 3, args.input_size, args.input_size)
     model = nn.yolo_v11_n(len(params['names'])).fuse()
 
