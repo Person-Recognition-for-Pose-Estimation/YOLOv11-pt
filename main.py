@@ -10,17 +10,17 @@ import yaml
 from torch.utils import data
 
 from nets import nn
+from nets.resnet_yolo import ResNetYOLO
 from utils import util
 from utils.dataset import Dataset
 
 warnings.filterwarnings("ignore")
 
-data_dir = '../Dataset/COCO'
+data_dir = '../Dataset/COCO' # TODO: Temp path
 
 
 def train(args, params):
-    # Model
-    model = nn.yolo_v11_n(len(params['names']))
+    model = ResNetYOLO(pretrained_yolo_path='path/to/yolo11n.pt') # TODO: Temp path
     model.cuda()
 
     # Optimizer
